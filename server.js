@@ -74,13 +74,14 @@ function dtHeaders() {
 // en la app — NO se llama automáticamente al guardar una solicitud.
 // Si la solicitud ya tiene dt_dispatch_id, se rechaza para evitar
 // crear despachos duplicados por doble clic o reintento.
-function nombreClienteDesdeTitulo(titulo){
+function partesCliente(titulo){
   // titulo viene como "ID - Nombre" (ej. "000-2 - Dhl Atlantis" o
   // "81.378.300-2 - Abbott Laboratories De Chile"). El RUT trae guiones
   // pegados sin espacio, así que separar por " - " (con espacios) es seguro.
-  if(!titulo) return "";
+  if(!titulo) return { id:"", nombre:titulo||"" };
   const partes = titulo.split(" - ");
-  return partes.length > 1 ? partes.slice(1).join(" - ").trim() : titulo.trim();
+  if(partes.length < 2) return { id:"", nombre:titulo.trim() };
+  return { id: partes[0].trim(), nombre: partes.slice(1).join(" - ").trim() };
 }
 
 app.post("/api/dispatches", checkPuenteToken, checkDispatchTrack, async (req, res) => {
@@ -93,13 +94,15 @@ app.post("/api/dispatches", checkPuenteToken, checkDispatchTrack, async (req, re
   }
 
   try {
-    const nombreCliente = nombreClienteDesdeTitulo(solicitud.titulo);
+    const { id: idCliente, nombre: nombreCliente } = partesCliente(solicitud.titulo);
     const fechaCompromiso = solicitud.fecha && solicitud.hora ? `${solicitud.fecha} ${solicitud.hora}` : (solicitud.fecha || null);
     const payload = {
       identifier: solicitud.ot, // QX-XXX, obligatorio
       contact_name: nombreCliente || solicitud.titulo || "",
       contact_address: solicitud.direccion || "",
       contact_phone: "", // "contacto" en Quantrex es texto libre (nombre/teléfono mezclado), no separable con certeza
+      contact_id: idCliente || "",
+      contact_identifier: idCliente || "", // mismo valor por compatibilidad (así lo hace Aquatrisq)
       min_delivery_time: fechaCompromiso,
       // Se replica en max_delivery_time para evitar que el panel de DispatchTrack
       // muestre "Fecha de compromiso: ... - Invalid date" cuando max queda null.
@@ -118,6 +121,7 @@ app.post("/api/dispatches", checkPuenteToken, checkDispatchTrack, async (req, re
         solicitud.usuarioDT ? { name: "Usuario DT", value: solicitud.usuarioDT, type: "string" } : null,
         solicitud.prioridad ? { name: "Prioridad", value: solicitud.prioridad, type: "string" } : null,
         solicitud.solicitante ? { name: "Solicitante", value: solicitud.solicitante, type: "string" } : null,
+        solicitud.canalSolicitud ? { name: "Canal Solicitud", value: solicitud.canalSolicitud, type: "string" } : null,
         solicitud.notas ? { name: "Notas", value: solicitud.notas, type: "string" } : null,
       ].filter(Boolean),
     };
