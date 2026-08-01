@@ -74,6 +74,15 @@ function dtHeaders() {
 // en la app — NO se llama automáticamente al guardar una solicitud.
 // Si la solicitud ya tiene dt_dispatch_id, se rechaza para evitar
 // crear despachos duplicados por doble clic o reintento.
+function nombreClienteDesdeTitulo(titulo){
+  // titulo viene como "ID - Nombre" (ej. "000-2 - Dhl Atlantis" o
+  // "81.378.300-2 - Abbott Laboratories De Chile"). El RUT trae guiones
+  // pegados sin espacio, así que separar por " - " (con espacios) es seguro.
+  if(!titulo) return "";
+  const partes = titulo.split(" - ");
+  return partes.length > 1 ? partes.slice(1).join(" - ").trim() : titulo.trim();
+}
+
 app.post("/api/dispatches", checkPuenteToken, checkDispatchTrack, async (req, res) => {
   const { solicitud } = req.body;
   if (!solicitud || !solicitud.ot) {
@@ -84,17 +93,23 @@ app.post("/api/dispatches", checkPuenteToken, checkDispatchTrack, async (req, re
   }
 
   try {
+    const nombreCliente = nombreClienteDesdeTitulo(solicitud.titulo);
+    const fechaCompromiso = solicitud.fecha && solicitud.hora ? `${solicitud.fecha} ${solicitud.hora}` : (solicitud.fecha || null);
     const payload = {
       identifier: solicitud.ot, // QX-XXX, obligatorio
-      contact_name: solicitud.destino || solicitud.titulo || "",
+      contact_name: nombreCliente || solicitud.titulo || "",
       contact_address: solicitud.direccion || "",
       contact_phone: "", // "contacto" en Quantrex es texto libre (nombre/teléfono mezclado), no separable con certeza
-      min_delivery_time: solicitud.fecha && solicitud.hora ? `${solicitud.fecha} ${solicitud.hora}` : (solicitud.fecha || null),
-      max_delivery_time: null,
+      min_delivery_time: fechaCompromiso,
+      // Se replica en max_delivery_time para evitar que el panel de DispatchTrack
+      // muestre "Fecha de compromiso: ... - Invalid date" cuando max queda null.
+      max_delivery_time: fechaCompromiso,
       to_be_payed: false,
       pickup_address: { name: DT_PICKUP_NAME }, // obligatorio
       items: [],
       tags: [
+        solicitud.descripcion ? { name: "Descripción", value: solicitud.descripcion, type: "string" } : null,
+        solicitud.destino && solicitud.destino !== nombreCliente ? { name: "Destino", value: solicitud.destino, type: "string" } : null,
         solicitud.tipo ? { name: "Tipo", value: solicitud.tipo, type: "string" } : null,
         solicitud.contacto ? { name: "Contacto", value: solicitud.contacto, type: "string" } : null,
         solicitud.guia ? { name: "Guia", value: solicitud.guia, type: "string" } : null,
@@ -130,20 +145,26 @@ app.post("/api/dispatches", checkPuenteToken, checkDispatchTrack, async (req, re
 // ── GET /api/track/:identifier — consultar estado de un despacho ──
 // Reemplaza el widget de copiar/pegar: la app llama aquí directo
 // con el número buscado y muestra el resultado en pantalla.
-// NOTA: el endpoint exacto de búsqueda no está confirmado contra
-// documentación (solo se probó el de creación, vía Aquatrisq).
-// Verificar contra la doc de la cuenta si /dispatches?identifier=
-// no devuelve resultados — puede requerir un parámetro distinto.
+// CONFIRMADO (prueba real 2026-08-01): el parámetro identifier del API
+// de DispatchTrack NO filtra exacto del lado del servidor — devuelve un
+// lote más amplio de despachos recientes. Por eso se filtra acá, en el
+// puente, por coincidencia exacta (sin distinguir mayúsculas/espacios)
+// antes de responder a la app.
 app.get("/api/track/:identifier", checkDispatchTrack, async (req, res) => {
   const { identifier } = req.params;
   if (!identifier) return res.status(400).json({ error: "Falta el identificador." });
+  const buscado = identifier.trim().toLowerCase();
 
   try {
     const r = await axios.get(`${DT_API_URL}/dispatches`, {
       headers: dtHeaders(),
       params: { identifier },
     });
-    return res.json({ ok: true, dispatchtrack: r.data });
+    const lote = r.data?.response || [];
+    const coincidencias = lote.filter(
+      (d) => (d.identifier || "").trim().toLowerCase() === buscado
+    );
+    return res.json({ ok: true, encontrados: coincidencias.length, dispatches: coincidencias });
   } catch (err) {
     const detalle = err?.response?.data || err.message;
     console.error("Error consultando dispatch:", JSON.stringify(detalle));
