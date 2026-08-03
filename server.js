@@ -154,6 +154,14 @@ app.post("/api/dispatches", checkPuenteToken, checkDispatchTrack, async (req, re
 // lote más amplio de despachos recientes. Por eso se filtra acá, en el
 // puente, por coincidencia exacta (sin distinguir mayúsculas/espacios)
 // antes de responder a la app.
+//
+// La respuesta de este endpoint NO trae firma/fotos/comentarios de la
+// "Prueba de entrega" — DispatchTrack solo envía eso una vez, por webhook,
+// al momento de cerrar la entrega. Por eso acá se complementa cada
+// coincidencia con lo que haya quedado guardado en dt_entregas_quantrex
+// (poblada por /api/webhooks/dispatchtrack más abajo). Entregas cerradas
+// antes de activar el webhook no van a tener este dato — no hay forma de
+// recuperarlo retroactivamente vía API.
 app.get("/api/track/:identifier", checkDispatchTrack, async (req, res) => {
   const { identifier } = req.params;
   if (!identifier) return res.status(400).json({ error: "Falta el identificador." });
@@ -165,15 +173,78 @@ app.get("/api/track/:identifier", checkDispatchTrack, async (req, res) => {
       params: { identifier },
     });
     const lote = r.data?.response || [];
-    const coincidencias = lote.filter(
+    let coincidencias = lote.filter(
       (d) => (d.identifier || "").trim().toLowerCase() === buscado
     );
+
+    if (supabase && coincidencias.length > 0) {
+      const ids = coincidencias.map((d) => d.dispatch_id).filter(Boolean);
+      const { data: entregas, error } = await supabase
+        .from("dt_entregas_quantrex")
+        .select("dispatch_id,evaluation_answers")
+        .in("dispatch_id", ids);
+      if (error) console.error("Error leyendo dt_entregas_quantrex:", error.message);
+      const porId = Object.fromEntries((entregas || []).map((e) => [e.dispatch_id, e.evaluation_answers]));
+      coincidencias = coincidencias.map((d) => ({
+        ...d,
+        evaluation_answers: porId[d.dispatch_id] || null,
+      }));
+    }
+
     return res.json({ ok: true, encontrados: coincidencias.length, dispatches: coincidencias });
   } catch (err) {
     const detalle = err?.response?.data || err.message;
     console.error("Error consultando dispatch:", JSON.stringify(detalle));
     return res.status(502).json({ error: "No se pudo consultar DispatchTrack.", detalle });
   }
+});
+
+// ── POST /api/webhooks/dispatchtrack — entrega completada ────
+// Configúralo en el panel de DispatchTrack (Webhooks) apuntando a:
+// https://TU-DOMINIO.up.railway.app/api/webhooks/dispatchtrack
+// Guarda el evento crudo siempre (para depurar), y una versión normalizada
+// con evaluation_answers TAL CUAL las manda DT — no se intenta adivinar
+// nombres de campo porque son específicos de cómo configuraste el
+// formulario del chofer en esta cuenta. El frontend muestra cada
+// name/value tal cual venga.
+app.post("/api/webhooks/dispatchtrack", async (req, res) => {
+  const evento = req.body;
+  console.log("📦 Webhook DispatchTrack (Quantrex):", JSON.stringify(evento));
+
+  if (supabase) {
+    try {
+      const { error } = await supabase.from("dt_eventos_quantrex").insert({ payload: evento });
+      if (error) console.error("Error guardando evento crudo:", error.message);
+    } catch (e) {
+      console.error("Excepción guardando evento crudo:", e.message);
+    }
+  }
+
+  if (supabase && evento && evento.resource === "dispatch" && evento.dispatch_id) {
+    const registro = {
+      dispatch_id: evento.dispatch_id,
+      identifier: evento.identifier || evento.guide || null,
+      status: evento.status ?? null,
+      substatus: evento.substatus || null,
+      contact_name: evento.contact_name || null,
+      contact_address: evento.contact_address || null,
+      number_of_retries: evento.number_of_retries ?? null,
+      arrived_at: evento.arrived_at || null,
+      evaluation_answers: evento.evaluation_answers || null,
+      raw: evento,
+      actualizado_en: new Date().toISOString(),
+    };
+    try {
+      const { error } = await supabase
+        .from("dt_entregas_quantrex")
+        .upsert(registro, { onConflict: "dispatch_id" });
+      if (error) console.error("Error en upsert dt_entregas_quantrex:", error.message);
+    } catch (e) {
+      console.error("Excepción en upsert dt_entregas_quantrex:", e.message);
+    }
+  }
+
+  return res.json({ received: true });
 });
 
 app.listen(PORT, () => console.log(`✅ Quantrex-Abbott DT bridge escuchando en puerto ${PORT}`));
