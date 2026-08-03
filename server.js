@@ -109,7 +109,14 @@ app.post("/api/dispatches", checkPuenteToken, checkDispatchTrack, async (req, re
       max_delivery_time: fechaCompromiso,
       to_be_payed: false,
       pickup_address: { name: DT_PICKUP_NAME }, // obligatorio
-      items: [],
+      items: Array.isArray(solicitud.items)
+        ? solicitud.items.filter(it=>it?.nombre).map((it,i)=>({
+            name: it.nombre,
+            description: it.nombre,
+            quantity: it.cantidad || 1,
+            code: String(i+1),
+          }))
+        : [],
       tags: [
         solicitud.descripcion ? { name: "Descripción", value: solicitud.descripcion, type: "string" } : null,
         solicitud.destino && solicitud.destino !== nombreCliente ? { name: "Destino", value: solicitud.destino, type: "string" } : null,
