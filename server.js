@@ -30,6 +30,7 @@ const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || "";
 const PUENTE_TOKEN = process.env.PUENTE_TOKEN || "";
 const DT_PICKUP_NAME = process.env.DT_PICKUP_NAME || "Bodega DHL Atlantis";
+const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || "";
 const PORT = process.env.PORT || 3000;
 
 const supabase =
@@ -44,8 +45,47 @@ app.get("/health", (req, res) =>
     service: "quantrex-dt-bridge",
     dispatchtrack: DT_API_KEY && DT_API_URL ? "configurado" : "falta DISPATCHTRACK_API_KEY o DT_API_URL",
     supabase: supabase ? "conectado" : "falta SUPABASE_URL/SERVICE_KEY",
+    google_maps: GOOGLE_MAPS_API_KEY ? "configurado" : "falta GOOGLE_MAPS_API_KEY",
   })
 );
+
+// ── GET /api/maps/snap-to-roads?path=lat,lng|lat,lng|... ──────────────────
+// Reemplaza el proxy público api.allorigins.win (poco confiable — falla
+// intermitente, issue documentado en su repo) por una llamada server-side
+// directa a la Roads API de Google. La app solo manda los puntos crudos;
+// la key de Google Maps vive acá, no en el bundle del frontend.
+app.get("/api/maps/snap-to-roads", async (req, res) => {
+  const { path } = req.query;
+  if (!GOOGLE_MAPS_API_KEY) return res.status(500).json({ error: "Falta GOOGLE_MAPS_API_KEY en el servidor." });
+  if (!path) return res.status(400).json({ error: "Falta el parámetro 'path'." });
+  try {
+    const r = await axios.get("https://roads.googleapis.com/v1/snapToRoads", {
+      params: { path, interpolate: true, key: GOOGLE_MAPS_API_KEY },
+    });
+    return res.json(r.data);
+  } catch (err) {
+    const detalle = err?.response?.data || err.message;
+    console.error("Error snapToRoads:", JSON.stringify(detalle));
+    return res.status(502).json({ error: "No se pudo consultar la Roads API.", detalle });
+  }
+});
+
+// ── GET /api/maps/distance-matrix?origins=...&destinations=... ────────────
+app.get("/api/maps/distance-matrix", async (req, res) => {
+  const { origins, destinations } = req.query;
+  if (!GOOGLE_MAPS_API_KEY) return res.status(500).json({ error: "Falta GOOGLE_MAPS_API_KEY en el servidor." });
+  if (!origins || !destinations) return res.status(400).json({ error: "Faltan 'origins'/'destinations'." });
+  try {
+    const r = await axios.get("https://maps.googleapis.com/maps/api/distancematrix/json", {
+      params: { origins, destinations, mode: "driving", language: "es", key: GOOGLE_MAPS_API_KEY },
+    });
+    return res.json(r.data);
+  } catch (err) {
+    const detalle = err?.response?.data || err.message;
+    console.error("Error distanceMatrix:", JSON.stringify(detalle));
+    return res.status(502).json({ error: "No se pudo consultar Distance Matrix.", detalle });
+  }
+});
 
 function checkPuenteToken(req, res, next) {
   if (!PUENTE_TOKEN) return next();
