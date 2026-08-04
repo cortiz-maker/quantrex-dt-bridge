@@ -19,6 +19,7 @@ const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
 const { createClient } = require("@supabase/supabase-js");
+const admin = require("firebase-admin");
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
@@ -38,6 +39,48 @@ const supabase =
     ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
     : null;
 
+// FIREBASE_SERVICE_ACCOUNT_JSON = el contenido COMPLETO del archivo JSON de
+// cuenta de servicio descargado de Firebase, pegado tal cual como valor de
+// esta variable de entorno en Railway (Railway sí acepta valores multilínea).
+let firebaseListo = false;
+try {
+  if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+    const cred = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+    admin.initializeApp({ credential: admin.credential.cert(cred) });
+    firebaseListo = true;
+  }
+} catch (e) {
+  console.error("Error inicializando Firebase Admin:", e.message);
+}
+
+// Envía una notificación push a un chofer, buscando su push_token guardado
+// en Supabase (tabla choferes, columna push_token — la app la actualiza sola
+// al iniciar sesión). Si el chofer no tiene token (nunca abrió la app nueva,
+// o negó el permiso), simplemente no se envía nada — no es un error.
+async function enviarPushAChofer(choferNombre, titulo, cuerpo, data = {}) {
+  if (!firebaseListo) return { ok: false, error: "Firebase no configurado en el servidor." };
+  if (!supabase) return { ok: false, error: "Supabase no configurado en el servidor." };
+  const { data: choferes, error } = await supabase
+    .from("choferes")
+    .select("push_token")
+    .eq("nombre", choferNombre)
+    .limit(1);
+  if (error) return { ok: false, error: error.message };
+  const token = choferes?.[0]?.push_token;
+  if (!token) return { ok: false, error: `El chofer "${choferNombre}" no tiene push_token registrado.` };
+  try {
+    await admin.messaging().send({
+      token,
+      notification: { title: titulo, body: cuerpo },
+      data: Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)])),
+      android: { priority: "high" },
+    });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
 // ── Healthcheck ──────────────────────────────────────────────
 app.get("/health", (req, res) =>
   res.json({
@@ -46,6 +89,7 @@ app.get("/health", (req, res) =>
     dispatchtrack: DT_API_KEY && DT_API_URL ? "configurado" : "falta DISPATCHTRACK_API_KEY o DT_API_URL",
     supabase: supabase ? "conectado" : "falta SUPABASE_URL/SERVICE_KEY",
     google_maps: GOOGLE_MAPS_API_KEY ? "configurado" : "falta GOOGLE_MAPS_API_KEY",
+    firebase: firebaseListo ? "configurado" : "falta FIREBASE_SERVICE_ACCOUNT_JSON",
   })
 );
 
@@ -246,7 +290,33 @@ app.get("/api/track/:identifier", checkDispatchTrack, async (req, res) => {
   }
 });
 
-// ── POST /api/webhooks/dispatchtrack — entrega completada ────
+// ── POST /api/notify/chofer — enviar push a un chofer ─────────────────────
+// Body: { choferNombre, titulo, cuerpo, data? }
+app.post("/api/notify/chofer", checkPuenteToken, async (req, res) => {
+  const { choferNombre, titulo, cuerpo, data } = req.body || {};
+  if (!choferNombre || !titulo || !cuerpo) {
+    return res.status(400).json({ error: "Se requiere choferNombre, titulo y cuerpo." });
+  }
+  const r = await enviarPushAChofer(choferNombre, titulo, cuerpo, data || {});
+  return res.status(r.ok ? 200 : 502).json(r);
+});
+
+// ── GET /api/notify/test?choferNombre=...&mensaje=... — prueba rápida ─────
+// Solo para probar desde el navegador mientras se arma la integración real
+// (no requiere token del puente, así se puede probar con solo pegar la URL).
+app.get("/api/notify/test", async (req, res) => {
+  const { choferNombre, mensaje } = req.query;
+  if (!choferNombre) return res.status(400).json({ error: "Falta ?choferNombre=" });
+  const r = await enviarPushAChofer(
+    choferNombre,
+    "Prueba Quantrex",
+    mensaje || "Esto es una notificación de prueba.",
+    { tipo: "prueba" }
+  );
+  return res.status(r.ok ? 200 : 502).json(r);
+});
+
+
 // Configúralo en el panel de DispatchTrack (Webhooks) apuntando a:
 // https://TU-DOMINIO.up.railway.app/api/webhooks/dispatchtrack
 // Guarda el evento crudo siempre (para depurar), y una versión normalizada
