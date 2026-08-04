@@ -20,6 +20,7 @@ const cors = require("cors");
 const axios = require("axios");
 const { createClient } = require("@supabase/supabase-js");
 const admin = require("firebase-admin");
+const { getMessaging } = require("firebase-admin/messaging");
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
@@ -46,7 +47,7 @@ let firebaseListo = false;
 try {
   if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
     const cred = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
-    admin.initializeApp({ credential: admin.credential.cert(cred) });
+    admin.initializeApp({ credential: admin.cert(cred) });
     firebaseListo = true;
   }
 } catch (e) {
@@ -69,7 +70,7 @@ async function enviarPushAChofer(choferNombre, titulo, cuerpo, data = {}) {
   const token = choferes?.[0]?.push_token;
   if (!token) return { ok: false, error: `El chofer "${choferNombre}" no tiene push_token registrado.` };
   try {
-    await admin.messaging().send({
+    await getMessaging().send({
       token,
       notification: { title: titulo, body: cuerpo },
       data: Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)])),
